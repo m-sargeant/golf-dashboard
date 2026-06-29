@@ -300,7 +300,192 @@ function StatPill({ label, value, unit, color }) {
   );
 }
 
-const TABS = ["Overview", "Variance", "Charts", "Table"];
+// ── Club Gapping View (2D dispersion with ellipses) ───────────────
+function GappingView() {
+  const canvasRef = useRef(null);
+
+  const clubData = CLUB_NAMES.map(c => {
+    const shots = ALL_SHOTS[c].shots;
+    const meanCarry = +avg(shots, "carry");
+    const meanSide  = +avg(shots, "side");
+    const sdCarry   = +stddev(shots, "carry");
+    const sdSide    = +stddev(shots, "side");
+    return { club: c, color: clubColors[c], shots, meanCarry, meanSide, sdCarry, sdSide };
+  });
+
+  const allCarries = clubData.flatMap(d => d.shots.map(s => s.carry));
+  const allSides   = clubData.flatMap(d => d.shots.map(s => s.side));
+  const minCarry = Math.min(...allCarries) - 8;
+  const maxCarry = Math.max(...allCarries) + 8;
+  const maxSideAbs = Math.max(Math.abs(Math.min(...allSides)), Math.abs(Math.max(...allSides))) + 6;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const PL = 36, PR = 16, PT = 16, PB = 28;
+    const plotW = W - PL - PR;
+    const plotH = H - PT - PB;
+
+    const toX = side  => PL + ((side + maxSideAbs) / (maxSideAbs * 2)) * plotW;
+    const toY = carry => PT + (1 - (carry - minCarry) / (maxCarry - minCarry)) * plotH;
+
+    // Background
+    ctx.fillStyle = "#0a0f1e";
+    ctx.fillRect(0, 0, W, H);
+
+    // Grid
+    ctx.strokeStyle = "#1e293b";
+    ctx.lineWidth = 0.5;
+    // Horizontal carry lines
+    const carryStep = 10;
+    for (let c = Math.ceil(minCarry / carryStep) * carryStep; c <= maxCarry; c += carryStep) {
+      const y = toY(c);
+      ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(W - PR, y); ctx.stroke();
+      ctx.fillStyle = "#334155"; ctx.font = "8px Inter,sans-serif"; ctx.textAlign = "right";
+      ctx.fillText(c, PL - 3, y + 3);
+    }
+    // Vertical side lines
+    for (let s = -Math.floor(maxSideAbs / 5) * 5; s <= maxSideAbs; s += 5) {
+      const x = toX(s);
+      ctx.beginPath(); ctx.moveTo(x, PT); ctx.lineTo(x, H - PB); ctx.stroke();
+      ctx.fillStyle = "#334155"; ctx.font = "8px Inter,sans-serif"; ctx.textAlign = "center";
+      ctx.fillText(s === 0 ? "0" : (s > 0 ? `R${s}` : `L${Math.abs(s)}`), x, H - PB + 10);
+    }
+
+    // Centre line
+    ctx.strokeStyle = "#334155";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(toX(0), PT); ctx.lineTo(toX(0), H - PB); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Axis labels
+    ctx.fillStyle = "#475569"; ctx.font = "8px Inter,sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("← Left · Right →", W / 2, H - 2);
+    ctx.save(); ctx.translate(10, H / 2); ctx.rotate(-Math.PI / 2);
+    ctx.fillText("Carry (yds)", 0, 0); ctx.restore();
+
+    // Draw each club
+    clubData.forEach(d => {
+      const cx = toX(d.meanSide);
+      const cy = toY(d.meanCarry);
+      // 1σ ellipse (contains ~68% of shots)
+      const rx = (d.sdSide / (maxSideAbs * 2)) * plotW;
+      const ry = (d.sdCarry / (maxCarry - minCarry)) * plotH;
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, Math.max(rx, 8), Math.max(ry, 8), 0, 0, Math.PI * 2);
+      ctx.fillStyle = d.color + "18";
+      ctx.fill();
+      ctx.strokeStyle = d.color + "99";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+
+      // Individual shots
+      d.shots.forEach(s => {
+        ctx.beginPath();
+        ctx.arc(toX(s.side), toY(s.carry), 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = d.color + "bb";
+        ctx.fill();
+        ctx.strokeStyle = "#0a0f1e";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+      });
+
+      // Centre dot
+      ctx.beginPath();
+      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = d.color;
+      ctx.fill();
+      ctx.strokeStyle = "#0a0f1e";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Club label next to centre dot
+      ctx.fillStyle = d.color;
+      ctx.font = "bold 10px Inter,sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(d.club, cx + 7, cy - 5);
+      ctx.fillStyle = "#475569";
+      ctx.font = "9px Inter,sans-serif";
+      ctx.fillText(`${d.meanCarry}y`, cx + 7, cy + 7);
+    });
+
+  }, []);
+
+  // Gap summary
+  const gaps = [];
+  for (let i = 0; i < clubData.length - 1; i++) {
+    const gap = +(clubData[i + 1].meanCarry - clubData[i].meanCarry).toFixed(1);
+    gaps.push({ label: `${clubData[i].club} → ${clubData[i+1].club}`, gap, color: clubData[i+1].color });
+  }
+
+  return (
+    <div>
+      <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, padding: "16px", marginBottom: 12 }}>
+        <div style={{ fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 2 }}>Shot Groupings · All Clubs</div>
+        <div style={{ fontSize: 10, color: "#334155", marginBottom: 12 }}>Ellipse = 1σ cluster · centre dot = avg · small dots = each shot</div>
+        <canvas ref={canvasRef} width={320} height={300} style={{ width: "100%", display: "block" }} />
+        <div style={{ display: "flex", gap: 16, justifyContent: "center", marginTop: 10 }}>
+          {clubData.map(d => <span key={d.club} style={{ fontSize: 11, color: d.color }}>● {d.club}</span>)}
+        </div>
+      </div>
+
+      {/* Gap cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+        {gaps.map(g => (
+          <div key={g.label} style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 10, padding: "12px 14px" }}>
+            <div style={{ fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>{g.label}</div>
+            <div style={{ fontSize: 24, fontWeight: 700, color: g.gap < 10 ? "#f59e0b" : "#4ade80" }}>
+              {g.gap}<span style={{ fontSize: 11, color: "#475569", marginLeft: 3 }}>yds</span>
+            </div>
+            <div style={{ fontSize: 10, color: g.gap < 10 ? "#f59e0b" : "#334155", marginTop: 4 }}>
+              {g.gap < 10 ? "⚠ gap too small" : "✓ good gap"}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Stats table */}
+      <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, padding: "16px" }}>
+        <div style={{ fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 14 }}>Club Averages</div>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr>
+              {["Club", "Avg Carry", "Spread", "Avg Side", "σ Side"].map(h => (
+                <th key={h} style={{ textAlign: "right", color: "#334155", fontWeight: 600, paddingBottom: 10, paddingRight: 10 }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {clubData.map(d => (
+              <tr key={d.club} style={{ borderTop: "1px solid #0f1929" }}>
+                <td style={{ padding: "9px 10px 9px 0", color: d.color, fontWeight: 700 }}>{d.club}</td>
+                <td style={{ textAlign: "right", padding: "9px 10px 9px 0", color: "#f1f5f9", fontWeight: 700 }}>{d.meanCarry}</td>
+                <td style={{ textAlign: "right", padding: "9px 10px 9px 0", color: "#94a3b8" }}>±{d.sdCarry}</td>
+                <td style={{ textAlign: "right", padding: "9px 10px 9px 0", color: "#94a3b8" }}>{d.meanSide}</td>
+                <td style={{ textAlign: "right", padding: "9px 10px 9px 0", color: "#94a3b8" }}>±{d.sdSide}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+const TABS = ["Overview", "Variance", "Charts", "Gapping", "Table"];
 
 export default function GolfDash() {
   const [activeClub, setActiveClub] = useState("PW");
@@ -455,6 +640,8 @@ export default function GolfDash() {
             </div>
           </>
         )}
+
+        {activeTab === "Gapping" && <GappingView />}
 
         {activeTab === "Table" && (
           <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 12, padding: "16px" }}>
